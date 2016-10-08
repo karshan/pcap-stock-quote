@@ -1,6 +1,5 @@
 {-# LANGUAGE MagicHash             #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE PartialTypeSignatures #-}
 module Main where
 
 import           Control.Monad.IO.Class    (liftIO)
