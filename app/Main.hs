@@ -58,6 +58,12 @@ pcapGlobalHdrLen = 24
 pcapPktHdrLen = 16
 quotePktLen = 215
 
+pcapHdrMagic :: Word32
+pcapHdrMagic = 0xa1b2c3d4
+
+quotePktMagic :: BS.ByteString
+quotePktMagic = "B6034"
+
 parseAndPrintChunk :: BS.ByteString -> FoldState -> IO (FoldState, BS.ByteString)
 parseAndPrintChunk chunk state =
     case state of
@@ -65,7 +71,7 @@ parseAndPrintChunk chunk state =
             if BS.length chunk < pcapGlobalHdrLen then
                 return (GetGlobalHeader, chunk)
             else
-                if getWord32At 0 chunk == 0xa1b2c3d4 then
+                if getWord32At 0 chunk == pcapHdrMagic then
                     parseAndPrintChunk (BS.drop pcapGlobalHdrLen chunk) GetPacket
                 else
                     return (FailState "Not a pcap file", "")
@@ -84,7 +90,7 @@ parseAndPrintChunk chunk state =
                         goNextPkt
                     else do
                         let pktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
-                        if BS.take 5 pktStart /= "B6034" then do
+                        if BS.take 5 pktStart /= quotePktMagic then do
                             goNextPkt
                         else do
                             liftIO $ C.putStrLn (BS.take quotePktLen pktStart)
