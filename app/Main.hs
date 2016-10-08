@@ -20,11 +20,16 @@ import           System.Environment        (getArgs)
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
 word32le :: BS.ByteString -> Word32
+{-# INLINE word32le #-}
 word32le = \s ->
               (fromIntegral (s `BS.unsafeIndex` 3) `shiftl_w32` 24) .|.
               (fromIntegral (s `BS.unsafeIndex` 2) `shiftl_w32` 16) .|.
               (fromIntegral (s `BS.unsafeIndex` 1) `shiftl_w32`  8) .|.
               (fromIntegral (s `BS.unsafeIndex` 0) )
+
+getWord32At :: Int -> BS.ByteString -> Word32
+{-# INLINE getWord32At #-}
+getWord32At n = word32le . BS.drop n
 
 data FoldState =
     GetGlobalHeader
@@ -48,37 +53,40 @@ parseAndPrintChunks lbs =
         (return ())
         lbs
 
-quotePktLen :: Int
+quotePktLen, pcapPktHdrLen :: Int
+pcapGlobalHdrLen = 24
+pcapPktHdrLen = 16
 quotePktLen = 215
 
 parseAndPrintChunk :: BS.ByteString -> FoldState -> IO (FoldState, BS.ByteString)
 parseAndPrintChunk chunk state =
     case state of
         GetGlobalHeader ->
-            if BS.length chunk < 24 then
+            if BS.length chunk < pcapGlobalHdrLen then
                 return (GetGlobalHeader, chunk)
             else
-                if word32le chunk == 0xa1b2c3d4 then
-                    parseAndPrintChunk (BS.drop 24 chunk) GetPacket
+                if getWord32At 0 chunk == 0xa1b2c3d4 then
+                    parseAndPrintChunk (BS.drop pcapGlobalHdrLen chunk) GetPacket
                 else
-                    return (FailState "missing global header", "")
+                    return (FailState "Not a pcap file", "")
         GetPacket -> do
-            if BS.length chunk < 16 then
+            if BS.length chunk < pcapPktHdrLen then
                 return (GetPacket, chunk)
             else do
-                let tm = (word32le chunk, word32le (BS.drop 4 chunk))
-                    pktlen = fromIntegral $ word32le (BS.drop 8 chunk)
-                    origlen = fromIntegral $ word32le (BS.drop 12 chunk)
-                if BS.length chunk < 16 + pktlen then
-                    return (GetPacket, chunk) -- TODO optimise so we dont need to reparse tm pktlen origlen ? seems like not a big deal
+                let pktTime = (getWord32At 0 chunk, getWord32At 4 chunk)
+                    pktLen = fromIntegral $ getWord32At 8 chunk
+                    origLen = fromIntegral $ getWord32At 12 chunk
+                    goNextPkt = parseAndPrintChunk (BS.drop (pcapPktHdrLen + pktLen) chunk) GetPacket
+                if BS.length chunk < pcapPktHdrLen + pktLen then
+                    return (GetPacket, chunk)
                 else
-                    if origlen /= pktlen || pktlen < quotePktLen then
-                        parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
+                    if origLen /= pktLen || pktLen < quotePktLen then
+                        goNextPkt
                     else do
-                        let pktStart = BS.drop (16 + pktlen - quotePktLen) chunk
+                        let pktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
                         if BS.take 5 pktStart /= "B6034" then do
-                            parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
+                            goNextPkt
                         else do
                             liftIO $ C.putStrLn (BS.take quotePktLen pktStart)
-                            parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
+                            goNextPkt
         FailState msg -> return (FailState msg, "")
