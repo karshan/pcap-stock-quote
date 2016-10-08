@@ -1,17 +1,25 @@
-{-# LANGUAGE OverloadedStrings, PartialTypeSignatures, MagicHash #-}
+{-# LANGUAGE MagicHash             #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 module Main where
 
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State.Class (get, put)
-import Control.Monad.State (StateT, evalStateT)
-import Data.Bits ((.|.))
-import qualified Data.ByteString as BS (ByteString, append, take, drop, length)
-import qualified Data.ByteString.Unsafe as BS (unsafeIndex)
-import qualified Data.ByteString.Char8 as C (putStrLn)
-import qualified Data.ByteString.Lazy as L (ByteString, readFile, foldrChunks)
-import System.Environment (getArgs)
-import GHC.Word (Word32(..))
-import GHC.Base (Int(..), uncheckedShiftL#)
+import           Control.Monad.IO.Class     (liftIO)
+import           Control.Monad.State.Class  (get, put)
+import           Control.Monad.State.Strict (StateT, evalStateT)
+import           Data.Binary.Get            (Decoder (..), Get, getByteString,
+                                             getWord32le, pushChunk,
+                                             runGetIncremental, runGetOrFail,
+                                             skip)
+import           Data.Bits                  ((.|.))
+import qualified Data.ByteString            as BS (ByteString, append, drop,
+                                                   length, take)
+import qualified Data.ByteString.Char8      as C (putStrLn)
+import qualified Data.ByteString.Lazy       as L (ByteString, foldrChunks,
+                                                  readFile)
+import qualified Data.ByteString.Unsafe     as BS (unsafeIndex)
+import           GHC.Base                   (Int (..), uncheckedShiftL#)
+import           GHC.Word                   (Word32 (..))
+import           System.Environment         (getArgs)
 
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
@@ -22,24 +30,21 @@ word32le = \s ->
               (fromIntegral (s `BS.unsafeIndex` 1) `shiftl_w32`  8) .|.
               (fromIntegral (s `BS.unsafeIndex` 0) )
 
-data FoldState =
-    GetGlobalHeader
-  | GetPacket
-  | FailState String
-        deriving (Eq, Show)
-
 main :: IO ()
 main = do
     (fn:_) <- getArgs
     lbs <- L.readFile fn
-    evalStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
+    case runGetOrFail getGlobalHeader lbs of
+        Right (leftover, _, True) ->
+            evalStateT (parseAndPrintChunks leftover) (runGetIncremental getPacket)
+        _ -> putStrLn "Not a pcap file"
 
-parseAndPrintChunks :: L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
+parseAndPrintChunks :: L.ByteString -> StateT (Decoder QuotePkt) IO ()
 parseAndPrintChunks lbs =
     L.foldrChunks
         (\e a -> do
-            (state, leftover) <- get
-            put =<< liftIO (parseAndPrintChunk (leftover `BS.append` e) state)
+            d <- get
+            put =<< liftIO (parseAndPrintChunk (d `pushChunk` e))
             a)
         (return ())
         lbs
@@ -47,34 +52,39 @@ parseAndPrintChunks lbs =
 quotePktLen :: Int
 quotePktLen = 215
 
-parseAndPrintChunk :: BS.ByteString -> FoldState -> IO (FoldState, BS.ByteString)
-parseAndPrintChunk chunk state =
-    case state of
-        GetGlobalHeader ->
-            if BS.length chunk < 24 then
-                return (GetGlobalHeader, chunk)
-            else
-                if word32le chunk == 0xa1b2c3d4 then
-                    parseAndPrintChunk (BS.drop 24 chunk) GetPacket
-                else
-                    return (FailState "missing global header", "")
-        GetPacket -> do
-            if BS.length chunk < 16 then
-                return (GetPacket, chunk)
-            else do
-                let tm = (word32le chunk, word32le (BS.drop 4 chunk))
-                    pktlen = fromIntegral $ word32le (BS.drop 8 chunk)
-                    origlen = fromIntegral $ word32le (BS.drop 12 chunk)
-                if BS.length chunk < 16 + pktlen then
-                    return (GetPacket, chunk) -- TODO optimise so we dont need to reparse tm pktlen origlen ? seems like not a big deal
-                else
-                    if origlen /= pktlen || pktlen < quotePktLen then
-                        parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
-                    else do
-                        let pktStart = BS.drop (16 + pktlen - quotePktLen) chunk
-                        if BS.take 5 pktStart /= "B6034" then do
-                            parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
-                        else do
-                            liftIO $ C.putStrLn (BS.take quotePktLen pktStart)
-                            parseAndPrintChunk (BS.drop (16 + pktlen) chunk) GetPacket
-        FailState msg -> return (FailState msg, "")
+parseAndPrintChunk :: Decoder QuotePkt -> IO (Decoder QuotePkt)
+parseAndPrintChunk d =
+    case d of
+        Done leftover _ quotePkt -> do
+            liftIO $ printQuotePkt quotePkt
+            parseAndPrintChunk (runGetIncremental getPacket `pushChunk` leftover)
+        resultDecoder -> return resultDecoder
+
+getGlobalHeader :: Get Bool
+getGlobalHeader = do
+    magic <- getWord32le
+    skip 20
+    return $ magic == 0xa1b2c3d4
+
+type QuotePkt = Maybe BS.ByteString
+
+getPacket :: Get QuotePkt
+getPacket = do
+    tm <- (,) <$> getWord32le <*> getWord32le
+    pktlen <- fromIntegral <$> getWord32le
+    origlen <- fromIntegral <$> getWord32le
+    if origlen /= pktlen || pktlen < quotePktLen then do
+        skip pktlen
+        return Nothing
+    else do
+        skip (pktlen - quotePktLen)
+        magic <- getByteString 5
+        if magic == "B6034" then
+            Just . BS.append "B6034" <$> getByteString (quotePktLen - 5)
+        else do
+            skip (quotePktLen - 5)
+            return Nothing
+
+printQuotePkt :: QuotePkt -> IO ()
+printQuotePkt (Just b) = C.putStrLn b
+printQuotePkt _ = return ()
