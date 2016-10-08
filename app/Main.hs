@@ -1,17 +1,21 @@
-{-# LANGUAGE OverloadedStrings, PartialTypeSignatures, MagicHash #-}
+{-# LANGUAGE MagicHash             #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 module Main where
 
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State.Class (get, put)
-import Control.Monad.State (StateT, evalStateT)
-import Data.Bits ((.|.))
-import qualified Data.ByteString as BS (ByteString, append, take, drop, length)
-import qualified Data.ByteString.Unsafe as BS (unsafeIndex)
-import qualified Data.ByteString.Char8 as C (putStrLn)
-import qualified Data.ByteString.Lazy as L (ByteString, readFile, foldrChunks)
-import System.Environment (getArgs)
-import GHC.Word (Word32(..))
-import GHC.Base (Int(..), uncheckedShiftL#)
+import           Control.Monad.IO.Class    (liftIO)
+import           Control.Monad.State       (StateT, evalStateT)
+import           Control.Monad.State.Class (get, put)
+import           Data.Bits                 ((.|.))
+import qualified Data.ByteString           as BS (ByteString, append, drop,
+                                                  length, take)
+import qualified Data.ByteString.Char8     as C (putStrLn)
+import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
+                                                 readFile)
+import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
+import           GHC.Base                  (Int (..), uncheckedShiftL#)
+import           GHC.Word                  (Word32 (..))
+import           System.Environment        (getArgs)
 
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
