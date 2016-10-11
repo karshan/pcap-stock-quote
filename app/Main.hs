@@ -1,27 +1,27 @@
-{-# LANGUAGE MagicHash             #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE MagicHash         #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Main where
 
 import           Control.Monad.IO.Class    (liftIO)
 import           Control.Monad.State       (StateT, execStateT)
 import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
-import qualified Data.ByteString           as BS (ByteString, append, drop,
-                                                  length, take, concat)
-import qualified Data.ByteString.Char8     as C (putStrLn, pack, unpack)
+import qualified Data.ByteString           as BS (ByteString, append, concat,
+                                                  drop, length, take)
+import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
                                                  readFile)
 import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
+import           Data.DateTime             (toGregorian)
+import           Data.Heap                 (Entry (..), Heap)
+import qualified Data.Heap                 as Heap
+import           Data.Monoid               ((<>))
+import           Data.Time.Clock
+import           Data.Time.Clock.POSIX
 import           GHC.Base                  (Int (..), uncheckedShiftL#)
 import           GHC.Word                  (Word32 (..))
 import           System.Environment        (getArgs)
-import Data.Heap (Entry(..), Heap)
-import qualified Data.Heap as Heap
-import Data.Time.Clock.POSIX
-import Data.Time.Clock
-import Data.DateTime (toGregorian)
-import Data.Monoid ((<>))
 
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
@@ -44,9 +44,9 @@ data FoldState =
         deriving (Eq, Show)
 
 data Time = Time {
-    t_hours :: !Int
-  , t_minutes :: !Int
-  , t_seconds :: !Int
+    t_hours        :: !Int
+  , t_minutes      :: !Int
+  , t_seconds      :: !Int
   , t_centiseconds :: !Int
 } deriving (Eq, Ord, Show)
 
@@ -61,11 +61,11 @@ pcapTimeToTime (pktSec, pktUsec) =
 type QtyPrice = (BS.ByteString, BS.ByteString)
 
 data QuotePkt = QuotePkt {
-    pktTime :: !Time
+    pktTime    :: !Time
   , acceptTime :: !Time
-  , issueCode :: !BS.ByteString
-  , bids :: [QtyPrice] -- TODO Vec ?
-  , asks :: [QtyPrice]
+  , issueCode  :: !BS.ByteString
+  , bids       :: [QtyPrice] -- TODO Vec ?
+  , asks       :: [QtyPrice]
 } deriving (Eq, Show)
 
 parseAcceptTime :: BS.ByteString -> Time
