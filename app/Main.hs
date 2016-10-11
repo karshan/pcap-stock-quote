@@ -37,6 +37,9 @@ getWord32At :: Int -> BS.ByteString -> Word32
 {-# INLINE getWord32At #-}
 getWord32At n = word32le . BS.drop n
 
+dropTake :: Int -> Int -> BS.ByteString -> BS.ByteString
+dropTake d t = BS.take t . BS.drop d
+
 data FoldState =
     GetGlobalHeader
   | GetPacket (Heap HeapEntry)
@@ -72,21 +75,22 @@ parseAcceptTime :: BS.ByteString -> Time
 parseAcceptTime inp =
     Time {
         t_hours = read $ C.unpack $ BS.take 2 inp
-      , t_minutes = read $ C.unpack $ BS.take 2 $ BS.drop 2 inp
-      , t_seconds = read $ C.unpack $ BS.take 2 $ BS.drop 4 inp
-      , t_centiseconds = read $ C.unpack $ BS.take 2 $ BS.drop 6 inp
+      , t_minutes = read $ C.unpack $ dropTake 2 2 inp
+      , t_seconds = read $ C.unpack $ dropTake 4 2 inp
+      , t_centiseconds = read $ C.unpack $ dropTake 6 2 inp
     }
 
+-- The returned list is in reverse order w.r.t. the input stream
 getQtyPrice :: Int -> [QtyPrice] -> BS.ByteString -> [QtyPrice]
 getQtyPrice 0 acc _ = acc
-getQtyPrice n acc inp = getQtyPrice (n - 1) ((BS.take 7 $ BS.drop 5 inp, BS.take 5 inp):acc) (BS.drop 12 inp)
+getQtyPrice n acc inp = getQtyPrice (n - 1) ((dropTake 5 7 inp, BS.take 5 inp):acc) (BS.drop 12 inp)
 
 parseQuotePkt :: Time -> BS.ByteString -> QuotePkt
 parseQuotePkt inPktTime rawPkt =
     QuotePkt {
         pktTime = inPktTime
-      , acceptTime = parseAcceptTime $ BS.take 8 $ BS.drop 206 rawPkt
-      , issueCode = BS.take 12 $ BS.drop 5 rawPkt
+      , acceptTime = parseAcceptTime $ dropTake 206 8 rawPkt
+      , issueCode = dropTake 5 12 rawPkt
       , bids = getQtyPrice 5 [] $ BS.drop 29 rawPkt
       , asks = getQtyPrice 5 [] $ BS.drop 96 rawPkt
     }
@@ -100,7 +104,7 @@ main = do
     s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
     case s of
         (GetPacket h, _) ->
-            flushHeap' h
+            foldMap (printQuotePkt . payload) h
         _ -> return ()
 
 parseAndPrintChunks :: L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
@@ -174,21 +178,11 @@ flushHeap t h =
                 return h
         _ -> return h
 
-flushHeap' :: Heap HeapEntry -> IO ()
-flushHeap' h =
-    case Heap.uncons h of
-        Just (min, rest) -> do
-            printQuotePkt (payload min)
-            flushHeap' rest
-        _ -> return ()
-
-
 printQuotePkt :: QuotePkt -> IO ()
 printQuotePkt QuotePkt{..} =
     C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
         <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
         <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") $ reverse asks)
     where
-        timeS t = C.pack $ padShow (t_hours t) ++ ":" ++ padShow (t_minutes t) ++ ":" ++ padShow (t_seconds t) ++ "." ++ decPadShow (t_centiseconds t)
+        timeS t = C.pack $ padShow (t_hours t) ++ ":" ++ padShow (t_minutes t) ++ ":" ++ padShow (t_seconds t) ++ "." ++ padShow (t_centiseconds t)
         padShow x = if x < 10 then '0':show x else show x
-        decPadShow x = if x < 10 then show x ++ "0" else show x
