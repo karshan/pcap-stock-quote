@@ -1,20 +1,27 @@
 {-# LANGUAGE MagicHash             #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RecordWildCards       #-}
 module Main where
 
 import           Control.Monad.IO.Class    (liftIO)
-import           Control.Monad.State       (StateT, evalStateT)
+import           Control.Monad.State       (StateT, execStateT)
 import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
 import qualified Data.ByteString           as BS (ByteString, append, drop,
-                                                  length, take)
-import qualified Data.ByteString.Char8     as C (putStrLn)
+                                                  length, take, concat)
+import qualified Data.ByteString.Char8     as C (putStrLn, pack, unpack)
 import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
                                                  readFile)
 import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
 import           GHC.Base                  (Int (..), uncheckedShiftL#)
 import           GHC.Word                  (Word32 (..))
 import           System.Environment        (getArgs)
+import Data.Heap (Entry(..), Heap)
+import qualified Data.Heap as Heap
+import Data.Time.Clock.POSIX
+import Data.Time.Clock
+import Data.DateTime (toGregorian)
+import Data.Monoid ((<>))
 
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
@@ -32,15 +39,69 @@ getWord32At n = word32le . BS.drop n
 
 data FoldState =
     GetGlobalHeader
-  | GetPacket
+  | GetPacket (Heap HeapEntry)
   | FailState String
         deriving (Eq, Show)
+
+data Time = Time {
+    t_hours :: !Int
+  , t_minutes :: !Int
+  , t_seconds :: !Int
+  , t_centiseconds :: !Int
+} deriving (Eq, Ord, Show)
+
+centiSecondsDiff :: Time -> Time -> Int
+centiSecondsDiff a b = ((t_hours a - t_hours b) * 360000) + ((t_minutes a - t_minutes b) * 6000) + ((t_seconds a - t_seconds b) * 100) + ((t_centiseconds a - t_centiseconds b))
+
+pcapTimeToTime :: (Word32, Word32) -> Time
+pcapTimeToTime (pktSec, pktUsec) =
+    let (_, _, _, hours, minutes, seconds) = toGregorian $ addUTCTime (9 * 3600) $ posixSecondsToUTCTime $ fromIntegral pktSec
+    in Time hours minutes seconds ((fromIntegral pktUsec) `div` 10000)
+
+type QtyPrice = (BS.ByteString, BS.ByteString)
+
+data QuotePkt = QuotePkt {
+    pktTime :: !Time
+  , acceptTime :: !Time
+  , issueCode :: !BS.ByteString
+  , bids :: [QtyPrice] -- TODO Vec ?
+  , asks :: [QtyPrice]
+} deriving (Eq, Show)
+
+parseAcceptTime :: BS.ByteString -> Time
+parseAcceptTime inp =
+    Time {
+        t_hours = read $ C.unpack $ BS.take 2 inp
+      , t_minutes = read $ C.unpack $ BS.take 2 $ BS.drop 2 inp
+      , t_seconds = read $ C.unpack $ BS.take 2 $ BS.drop 4 inp
+      , t_centiseconds = read $ C.unpack $ BS.take 2 $ BS.drop 6 inp
+    }
+
+getQtyPrice :: Int -> [QtyPrice] -> BS.ByteString -> [QtyPrice]
+getQtyPrice 0 acc _ = acc
+getQtyPrice n acc inp = getQtyPrice (n - 1) ((BS.take 7 $ BS.drop 5 inp, BS.take 5 inp):acc) (BS.drop 12 inp)
+
+parseQuotePkt :: Time -> BS.ByteString -> QuotePkt
+parseQuotePkt inPktTime rawPkt =
+    QuotePkt {
+        pktTime = inPktTime
+      , acceptTime = parseAcceptTime $ BS.take 8 $ BS.drop 206 rawPkt
+      , issueCode = BS.take 12 $ BS.drop 5 rawPkt
+      , bids = getQtyPrice 5 [] $ BS.drop 29 rawPkt
+      , asks = getQtyPrice 5 [] $ BS.drop 96 rawPkt
+    }
+
+type HeapEntry = Entry Time QuotePkt
 
 main :: IO ()
 main = do
     (fn:_) <- getArgs
     lbs <- L.readFile fn
-    evalStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
+    s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
+    case s of
+        (GetPacket h, _) ->
+            flushHeap' h
+        _ -> return ()
 
 parseAndPrintChunks :: L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
 parseAndPrintChunks lbs =
@@ -71,27 +132,63 @@ parseAndPrintChunk chunk state =
                 return (GetGlobalHeader, chunk)
             else
                 if getWord32At 0 chunk == pcapHdrMagic then
-                    parseAndPrintChunk (BS.drop pcapGlobalHdrLen chunk) GetPacket
+                    parseAndPrintChunk (BS.drop pcapGlobalHdrLen chunk) (GetPacket Heap.empty)
                 else
                     return (FailState "Not a pcap file", "")
-        GetPacket -> do
+        GetPacket h -> do
             if BS.length chunk < pcapPktHdrLen then
-                return (GetPacket, chunk)
+                return (GetPacket h, chunk)
             else do
-                let pktTime = (getWord32At 0 chunk, getWord32At 4 chunk)
+                let pktTime = pcapTimeToTime (getWord32At 0 chunk, getWord32At 4 chunk)
                     pktLen = fromIntegral $ getWord32At 8 chunk
                     origLen = fromIntegral $ getWord32At 12 chunk
-                    goNextPkt = parseAndPrintChunk (BS.drop (pcapPktHdrLen + pktLen) chunk) GetPacket
+                    goNextPkt h' = parseAndPrintChunk (BS.drop (pcapPktHdrLen + pktLen) chunk) (GetPacket h')
                 if BS.length chunk < pcapPktHdrLen + pktLen then
-                    return (GetPacket, chunk)
+                    return (GetPacket h, chunk)
                 else
-                    if origLen /= pktLen || pktLen < quotePktLen then
-                        goNextPkt
+                    if origLen /= pktLen || pktLen < quotePktLen then do
+                        h' <- flushHeap pktTime h
+                        goNextPkt h'
                     else do
-                        let pktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
-                        if BS.take 5 pktStart /= quotePktMagic then do
-                            goNextPkt
+                        let quotePktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
+                        if BS.take 5 quotePktStart /= quotePktMagic then do
+                            h' <- flushHeap pktTime h
+                            goNextPkt h'
                         else do
-                            liftIO $ C.putStrLn (BS.take quotePktLen pktStart)
+                            h' <- flushHeap pktTime h
+                            let quotePkt = parseQuotePkt pktTime (BS.take quotePktLen quotePktStart)
                             goNextPkt
+                                (Heap.insert
+                                    (Entry (acceptTime quotePkt) quotePkt)
+                                    h')
         FailState msg -> return (FailState msg, "")
+
+flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
+flushHeap t h =
+    case Heap.uncons h of
+        Just (min, rest) ->
+            if t `centiSecondsDiff` priority min > 300 then do
+                printQuotePkt (payload min)
+                flushHeap t rest
+            else
+                return h
+        _ -> return h
+
+flushHeap' :: Heap HeapEntry -> IO ()
+flushHeap' h =
+    case Heap.uncons h of
+        Just (min, rest) -> do
+            printQuotePkt (payload min)
+            flushHeap' rest
+        _ -> return ()
+
+
+printQuotePkt :: QuotePkt -> IO ()
+printQuotePkt QuotePkt{..} =
+    C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
+        <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
+        <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") $ reverse asks)
+    where
+        timeS t = C.pack $ padShow (t_hours t) ++ ":" ++ padShow (t_minutes t) ++ ":" ++ padShow (t_seconds t) ++ "." ++ decPadShow (t_centiseconds t)
+        padShow x = if x < 10 then '0':show x else show x
+        decPadShow x = if x < 10 then show x ++ "0" else show x
