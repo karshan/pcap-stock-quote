@@ -8,7 +8,7 @@ import           Control.Monad.State       (StateT, execStateT)
 import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
 import qualified Data.ByteString           as BS (ByteString, append, concat,
-                                                  drop, length, take)
+                                                  drop, length, take, takeWhile, intercalate)
 import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
                                                  readFile)
@@ -23,8 +23,12 @@ import           GHC.Base                  (Int (..), uncheckedShiftL#)
 import           GHC.Word                  (Word32 (..))
 import           System.Environment        (getArgs)
 
+-- shiftl_w32 and word32le are from the binary package
+-- https://hackage.haskell.org/package/binary-strict-0.2/src/src/Data/Binary/Strict/Get.hs
+shiftl_w32 :: Word32 -> Int -> Word32
 shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
 
+-- Read the first 4 bytes of a ByteString as a Word32
 word32le :: BS.ByteString -> Word32
 {-# INLINE word32le #-}
 word32le = \s ->
@@ -54,8 +58,13 @@ data Time = Time {
 } deriving (Eq, Ord, Show)
 
 centiSecondsDiff :: Time -> Time -> Int
-centiSecondsDiff a b = ((t_hours a - t_hours b) * 360000) + ((t_minutes a - t_minutes b) * 6000) + ((t_seconds a - t_seconds b) * 100) + ((t_centiseconds a - t_centiseconds b))
+centiSecondsDiff a b =
+    ((t_hours a - t_hours b) * 360000)
+        + ((t_minutes a - t_minutes b) * 6000)
+        + ((t_seconds a - t_seconds b) * 100)
+        + (t_centiseconds a - t_centiseconds b)
 
+-- also converts to JST (UTC+09:00)
 pcapTimeToTime :: (Word32, Word32) -> Time
 pcapTimeToTime (pktSec, pktUsec) =
     let (_, _, _, hours, minutes, seconds) = toGregorian $ addUTCTime (9 * 3600) $ posixSecondsToUTCTime $ fromIntegral pktSec
@@ -81,9 +90,11 @@ parseAcceptTime inp =
     }
 
 -- The returned list is in reverse order w.r.t. the input stream
-getQtyPrice :: Int -> [QtyPrice] -> BS.ByteString -> [QtyPrice]
-getQtyPrice 0 acc _ = acc
-getQtyPrice n acc inp = getQtyPrice (n - 1) ((dropTake 5 7 inp, BS.take 5 inp):acc) (BS.drop 12 inp)
+parseNQtyPrice :: Int -> BS.ByteString -> [QtyPrice]
+parseNQtyPrice = go []
+    where
+        go acc 0 _ = acc
+        go acc n inp = go ((dropTake 5 7 inp, BS.take 5 inp):acc) (n - 1) (BS.drop 12 inp)
 
 parseQuotePkt :: Time -> BS.ByteString -> QuotePkt
 parseQuotePkt inPktTime rawPkt =
@@ -91,8 +102,8 @@ parseQuotePkt inPktTime rawPkt =
         pktTime = inPktTime
       , acceptTime = parseAcceptTime $ dropTake 206 8 rawPkt
       , issueCode = dropTake 5 12 rawPkt
-      , bids = getQtyPrice 5 [] $ BS.drop 29 rawPkt
-      , asks = getQtyPrice 5 [] $ BS.drop 96 rawPkt
+      , bids = parseNQtyPrice 5 $ BS.drop 29 rawPkt
+      , asks = parseNQtyPrice 5 $ BS.drop 96 rawPkt
     }
 
 type HeapEntry = Entry Time QuotePkt
@@ -167,6 +178,8 @@ parseAndPrintChunk chunk state =
                                     h')
         FailState msg -> return (FailState msg, "")
 
+-- Print all packets in the heap that have accept times more than 3 seconds in the past
+-- from the given time.
 flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
 flushHeap t h =
     case Heap.uncons h of
@@ -182,7 +195,14 @@ printQuotePkt :: QuotePkt -> IO ()
 printQuotePkt QuotePkt{..} =
     C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
         <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
-        <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") $ reverse asks)
+        <> BS.intercalate " " (map (\(q, p) -> q <> "@" <> p) $ reverse asks)
     where
-        timeS t = C.pack $ padShow (t_hours t) ++ ":" ++ padShow (t_minutes t) ++ ":" ++ padShow (t_seconds t) ++ "." ++ padShow (t_centiseconds t)
+        timeS t = C.pack $ padShow (t_hours t) ++ ":"
+                    ++ padShow (t_minutes t) ++ ":"
+                    ++ padShow (t_seconds t) ++ "."
+                    ++ padShow (t_centiseconds t)
         padShow x = if x < 10 then '0':show x else show x
+        qtyPriceStr (q, p) = q <> "@" <> p
+        -- removeLeadingZeros, unused
+        rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
+                in if nlz == BS.length a then "0" else BS.drop nlz a
