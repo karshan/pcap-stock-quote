@@ -108,9 +108,20 @@ parseQuotePkt inPktTime rawPkt =
 
 type HeapEntry = Entry Time QuotePkt
 
+usage :: IO ()
+usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
+
 main :: IO ()
 main = do
-    (fn:_) <- getArgs
+    args <- getArgs
+    case args of
+        ("-r":fn:[]) -> run True fn
+        (fn:"-r":[]) -> run True fn
+        (fn:[]) -> run False fn
+        _ -> usage
+
+run :: Bool -> String -> IO ()
+run sort fn = do
     lbs <- L.readFile fn
     s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
     case s of
@@ -123,7 +134,7 @@ parseAndPrintChunks lbs =
     L.foldrChunks
         (\e a -> do
             (state, leftover) <- get
-            put =<< liftIO (parseAndPrintChunk (leftover `BS.append` e) state)
+            put =<< liftIO (execStateT parseAndPrintChunk (state, leftover <> e))
             a)
         (return ())
         lbs
@@ -139,44 +150,51 @@ pcapHdrMagic = 0xa1b2c3d4
 quotePktMagic :: BS.ByteString
 quotePktMagic = "B6034"
 
-parseAndPrintChunk :: BS.ByteString -> FoldState -> IO (FoldState, BS.ByteString)
-parseAndPrintChunk chunk state =
+parseAndPrintChunk :: StateT (FoldState, BS.ByteString) IO ()
+parseAndPrintChunk = do
+    (state, chunk) <- get
     case state of
         GetGlobalHeader ->
             if BS.length chunk < pcapGlobalHdrLen then
-                return (GetGlobalHeader, chunk)
+                return ()
             else
-                if getWord32At 0 chunk == pcapHdrMagic then
-                    parseAndPrintChunk (BS.drop pcapGlobalHdrLen chunk) (GetPacket Heap.empty)
-                else
-                    return (FailState "Not a pcap file", "")
+                if getWord32At 0 chunk == pcapHdrMagic then do
+                    put (GetPacket Heap.empty, BS.drop pcapGlobalHdrLen chunk)
+                    parseAndPrintChunk
+                else do
+                    put (FailState "Not a pcap file", "")
+                    return ()
         GetPacket h -> do
             if BS.length chunk < pcapPktHdrLen then
-                return (GetPacket h, chunk)
+                return ()
             else do
                 let pktTime = pcapTimeToTime (getWord32At 0 chunk, getWord32At 4 chunk)
                     pktLen = fromIntegral $ getWord32At 8 chunk
                     origLen = fromIntegral $ getWord32At 12 chunk
-                    goNextPkt h' = parseAndPrintChunk (BS.drop (pcapPktHdrLen + pktLen) chunk) (GetPacket h')
+                    goNextPkt h' = do
+                        put (GetPacket h', BS.drop (pcapPktHdrLen + pktLen) chunk)
+                        parseAndPrintChunk
                 if BS.length chunk < pcapPktHdrLen + pktLen then
-                    return (GetPacket h, chunk)
+                    return ()
                 else
                     if origLen /= pktLen || pktLen < quotePktLen then do
-                        h' <- flushHeap pktTime h
+                        h' <- liftIO $ flushHeap pktTime h
                         goNextPkt h'
                     else do
                         let quotePktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
                         if BS.take 5 quotePktStart /= quotePktMagic then do
-                            h' <- flushHeap pktTime h
+                            h' <- liftIO $ flushHeap pktTime h
                             goNextPkt h'
                         else do
-                            h' <- flushHeap pktTime h
+                            h' <- liftIO $ flushHeap pktTime h
                             let quotePkt = parseQuotePkt pktTime (BS.take quotePktLen quotePktStart)
                             goNextPkt
                                 (Heap.insert
                                     (Entry (acceptTime quotePkt) quotePkt)
                                     h')
-        FailState msg -> return (FailState msg, "")
+        FailState msg -> do
+            put (FailState msg, "")
+            return ()
 
 -- Print all packets in the heap that have accept times more than 3 seconds in the past
 -- from the given time.
