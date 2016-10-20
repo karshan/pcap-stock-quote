@@ -4,8 +4,8 @@
 module Main where
 
 import qualified Data.ByteString               as BS (ByteString, concat, drop,
-                                                      intercalate, take, replicate, writeFile, appendFile)
-import qualified Data.ByteString.Char8         as C (pack, putStrLn, unpack)
+                                                      intercalate, take, replicate, writeFile, appendFile, head, last)
+import qualified Data.ByteString.Char8         as C (putStrLn, pack)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
 import           Data.Heap                     (Entry (..), Heap)
@@ -142,6 +142,7 @@ timeS t = C.pack $ padShow (t_hours t)
         padShow x = if x < 10 then '0':show x else show x
 
 
+
 type QtyPrice = (BS.ByteString, BS.ByteString)
 
 data QuotePkt = QuotePkt {
@@ -155,11 +156,14 @@ data QuotePkt = QuotePkt {
 parseAcceptTime :: BS.ByteString -> Time
 parseAcceptTime inp =
     Time {
-        t_hours = read $ C.unpack $ BS.take 2 inp
-      , t_minutes = read $ C.unpack $ dropTake 2 2 inp
-      , t_seconds = read $ C.unpack $ dropTake 4 2 inp
-      , t_centiseconds = read $ C.unpack $ dropTake 6 2 inp
+        t_hours = readInt $ BS.take 2 inp
+      , t_minutes = readInt $ dropTake 2 2 inp
+      , t_seconds = readInt $ dropTake 4 2 inp
+      , t_centiseconds = readInt $ dropTake 6 2 inp
     }
+    where
+        readInt b = ((fromIntegral (BS.head b) - 0x30) * 10) +
+                        (fromIntegral (BS.last b) - 0x30)
 
 -- The returned list is in reverse order w.r.t. the input stream
 parseNQtyPrice :: Int -> BS.ByteString -> [QtyPrice]

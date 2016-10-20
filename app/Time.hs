@@ -8,9 +8,9 @@ module Time
     )
     where
 
-import           Data.DateTime         (toGregorian, fromGregorian)
+import           Data.DateTime         (fromGregorian)
 import           Data.Time.Clock       (addUTCTime, diffTimeToPicoseconds)
-import           Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           GHC.Word              (Word32)
 
 data Time = Time {
@@ -43,8 +43,12 @@ addCentiSeconds Time{..} n =
 -- also converts to JST (UTC+09:00)
 pcapTimeToTime :: (Word32, Word32) -> Time
 pcapTimeToTime (pktSec, pktUsec) =
-    let (_, _, _, hours, minutes, seconds) = toGregorian $ addUTCTime (9 * 3600) $ posixSecondsToUTCTime $ fromIntegral pktSec
-    in Time hours minutes seconds ((fromIntegral pktUsec) `div` 10000)
+    let
+        sec = fromIntegral (pktSec `mod` 86400)
+        (m', s) = sec `quotRem` 60
+        (h, m) = m' `quotRem` 60
+    in
+        Time (h + 9) m s ((fromIntegral pktUsec) `div` 10000)
 
 timeToPcapTime :: Time -> (Word32, Word32)
 timeToPcapTime Time{..} =
