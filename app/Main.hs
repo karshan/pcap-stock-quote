@@ -3,14 +3,11 @@
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
-import           Control.Monad.IO.Class    (liftIO)
-import           Control.Monad.State       (StateT, execStateT)
-import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
-import qualified Data.ByteString           as BS (null, ByteString, append, concat,
-                                                  drop, length, take, takeWhile, intercalate)
+import qualified Data.ByteString           as BS (null, ByteString, concat,
+                                                  drop, length, take, intercalate)
 import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
-import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
+import qualified Data.ByteString.Lazy      as L (ByteString,
                                                  readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString(..))
 import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
@@ -131,18 +128,30 @@ main = do
 run :: Bool -> String -> IO ()
 run sort fn = do
     lbs <- L.readFile fn
-    if sort then do
-        s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
-        case s of
-            (GetPacket h, _) ->
-                foldMap (printQuotePkt . payload) h
-            _ -> return ()
-    else
-        case runParser lbs pcapHdrParser of
-            Left s -> putStrLn $ "pcapHdrParser failed: " ++ s
-            Right (False, _) -> putStrLn "not a pcap file"
-            Right (True, rest) ->
+    case runParser lbs pcapHdrParser of
+        Left s -> putStrLn $ "pcapHdrParser failed: " ++ s
+        Right (False, _) -> putStrLn "not a pcap file"
+        Right (True, rest) ->
+            if sort then
+                parseNSortPrint rest
+            else
                 parseNPrint rest
+
+parseNSortPrint :: L.ByteString -> IO ()
+parseNSortPrint inp = go Heap.empty inp
+    where
+        go h L.Empty = foldMap (printQuotePkt . payload) h
+        go h i =
+            case runParser i quotePktParser of
+                Right (a, rest) ->
+                    case a of
+                        (Left time) -> do
+                            h' <- flushHeap time h
+                            go h' rest
+                        (Right pkt) -> do
+                            h' <- flushHeap (pktTime pkt) h
+                            go (Heap.insert (Entry (acceptTime pkt) pkt) h') rest
+                Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
 parseNPrint :: L.ByteString -> IO ()
 parseNPrint L.Empty = return ()
@@ -154,17 +163,7 @@ parseNPrint i =
                 (Right pkt) -> printQuotePkt pkt >> parseNPrint rest
         Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
-parseAndPrintChunks :: L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
-parseAndPrintChunks lbs =
-    L.foldrChunks
-        (\e a -> do
-            (state, leftover) <- get
-            put =<< liftIO (execStateT parseAndPrintChunk (state, leftover <> e))
-            a)
-        (return ())
-        lbs
-
-quotePktLen, pcapPktHdrLen :: Int
+pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen :: Int
 pcapGlobalHdrLen = 24
 pcapPktHdrLen = 16
 quotePktLen = 215
@@ -242,60 +241,14 @@ quotePktParser i =
                         else
                             Done leftover (Right $ parseQuotePkt pktTime quotePktStart)
 
-parseAndPrintChunk :: StateT (FoldState, BS.ByteString) IO ()
-parseAndPrintChunk = do
-    (state, chunk) <- get
-    case state of
-        GetGlobalHeader ->
-            if BS.length chunk < pcapGlobalHdrLen then
-                return ()
-            else
-                if getWord32At 0 chunk == pcapHdrMagic then do
-                    put (GetPacket Heap.empty, BS.drop pcapGlobalHdrLen chunk)
-                    parseAndPrintChunk
-                else do
-                    put (FailState "Not a pcap file", "")
-                    return ()
-        GetPacket h -> do
-            if BS.length chunk < pcapPktHdrLen then
-                return ()
-            else do
-                let pktTime = pcapTimeToTime (getWord32At 0 chunk, getWord32At 4 chunk)
-                    pktLen = fromIntegral $ getWord32At 8 chunk
-                    origLen = fromIntegral $ getWord32At 12 chunk
-                    goNextPkt h' = do
-                        put (GetPacket h', BS.drop (pcapPktHdrLen + pktLen) chunk)
-                        parseAndPrintChunk
-                if BS.length chunk < pcapPktHdrLen + pktLen then
-                    return ()
-                else
-                    if origLen /= pktLen || pktLen < quotePktLen then do
-                        h' <- liftIO $ flushHeap pktTime h
-                        goNextPkt h'
-                    else do
-                        let quotePktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) chunk
-                        if BS.take 5 quotePktStart /= quotePktMagic then do
-                            h' <- liftIO $ flushHeap pktTime h
-                            goNextPkt h'
-                        else do
-                            h' <- liftIO $ flushHeap pktTime h
-                            let quotePkt = parseQuotePkt pktTime (BS.take quotePktLen quotePktStart)
-                            goNextPkt
-                                (Heap.insert
-                                    (Entry (acceptTime quotePkt) quotePkt)
-                                    h')
-        FailState msg -> do
-            put (FailState msg, "")
-            return ()
-
 -- Print all packets in the heap that have accept times more than 3 seconds in the past
 -- from the given time.
 flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
 flushHeap t h =
     case Heap.uncons h of
-        Just (min, rest) ->
-            if t `centiSecondsDiff` priority min > 300 then do
-                printQuotePkt (payload min)
+        Just (minE, rest) ->
+            if t `centiSecondsDiff` priority minE > 300 then do
+                printQuotePkt (payload minE)
                 flushHeap t rest
             else
                 return h
@@ -305,7 +258,7 @@ printQuotePkt :: QuotePkt -> IO ()
 printQuotePkt QuotePkt{..} =
     C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
         <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
-        <> BS.intercalate " " (map (\(q, p) -> q <> "@" <> p) $ reverse asks)
+        <> BS.intercalate " " (map qtyPriceStr $ reverse asks)
     where
         timeS t = C.pack $ padShow (t_hours t) ++ ":"
                     ++ padShow (t_minutes t) ++ ":"
@@ -313,6 +266,6 @@ printQuotePkt QuotePkt{..} =
                     ++ padShow (t_centiseconds t)
         padShow x = if x < 10 then '0':show x else show x
         qtyPriceStr (q, p) = q <> "@" <> p
-        -- removeLeadingZeros, unused
+        {- removeLeadingZeros, unused
         rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
-                in if nlz == BS.length a then "0" else BS.drop nlz a
+                in if nlz == BS.length a then "0" else BS.drop nlz a -}
