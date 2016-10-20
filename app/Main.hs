@@ -31,7 +31,7 @@ sConsLazy b l =
 -- shiftl_w32 and word32le are from the binary package
 -- https://hackage.haskell.org/package/binary-strict-0.2/src/src/Data/Binary/Strict/Get.hs
 shiftl_w32 :: Word32 -> Int -> Word32
-shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#`   i)
+shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#` i)
 
 -- Read the first 4 bytes of a ByteString as a Word32
 word32le :: BS.ByteString -> Word32
@@ -48,12 +48,6 @@ getWord32At n = word32le . BS.drop n
 
 dropTake :: Int -> Int -> BS.ByteString -> BS.ByteString
 dropTake d t = BS.take t . BS.drop d
-
-data FoldState =
-    GetGlobalHeader
-  | GetPacket (Heap HeapEntry)
-  | FailState String
-        deriving (Eq, Show)
 
 data Time = Time {
     t_hours        :: !Int
@@ -111,8 +105,6 @@ parseQuotePkt inPktTime rawPkt =
       , asks = parseNQtyPrice 5 $ BS.drop 96 rawPkt
     }
 
-type HeapEntry = Entry Time QuotePkt
-
 usage :: IO ()
 usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
 
@@ -130,16 +122,19 @@ run sort fn = do
     lbs <- L.readFile fn
     case runParser lbs pcapHdrParser of
         Left s -> putStrLn $ "pcapHdrParser failed: " ++ s
-        Right (False, _) -> putStrLn "not a pcap file"
+        Right (False, _) -> putStrLn "Error: not a pcap file"
         Right (True, rest) ->
             if sort then
-                parseNSortPrint rest
+                runSort rest
             else
-                parseNPrint rest
+                runNormal rest
 
-parseNSortPrint :: L.ByteString -> IO ()
-parseNSortPrint inp = go Heap.empty inp
+type HeapEntry = Entry Time QuotePkt
+
+runSort :: L.ByteString -> IO ()
+runSort inp = go Heap.empty inp
     where
+        go :: Heap HeapEntry -> L.ByteString -> IO ()
         go h L.Empty = foldMap (printQuotePkt . payload) h
         go h i =
             case runParser i quotePktParser of
@@ -153,14 +148,14 @@ parseNSortPrint inp = go Heap.empty inp
                             go (Heap.insert (Entry (acceptTime pkt) pkt) h') rest
                 Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
-parseNPrint :: L.ByteString -> IO ()
-parseNPrint L.Empty = return ()
-parseNPrint i =
+runNormal :: L.ByteString -> IO ()
+runNormal L.Empty = return ()
+runNormal i =
     case runParser i quotePktParser of
         Right (a, rest) ->
             case a of
-                (Left _) -> parseNPrint rest
-                (Right pkt) -> printQuotePkt pkt >> parseNPrint rest
+                (Left _) -> runNormal rest
+                (Right pkt) -> printQuotePkt pkt >> runNormal rest
         Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
 pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen :: Int
@@ -181,27 +176,19 @@ data ParserOut a =
   | Done BS.ByteString a
   | Error String
 
-(>*) :: Parser a -> (a -> Parser b) -> Parser b
-(>*) f g i =
-    case f i of
-        NotEnoughInput -> NotEnoughInput
-        Error s -> Error s
-        Done leftover a -> g a leftover
-
 runParser :: L.ByteString -> Parser a -> Either String (a, L.ByteString)
-runParser l p = runParser' "" l p
-
-runParser' :: BS.ByteString -> L.ByteString -> Parser a -> Either String (a, L.ByteString)
-runParser' x L.Empty p =
-    case p x of
-        NotEnoughInput -> Left "NotEnoughInput"
-        Done leftover a -> Right (a, L.Chunk leftover L.Empty)
-        Error s -> Left s
-runParser' x (L.Chunk y ys) p =
-    case p (x <> y) of
-        NotEnoughInput -> runParser' (x <> y) ys p
-        Done leftover a -> Right (a, sConsLazy leftover ys)
-        Error s -> Left s
+runParser l p = go "" l
+    where
+        go x L.Empty =
+            case p x of
+                NotEnoughInput -> Left "NotEnoughInput"
+                Done leftover a -> Right (a, L.Chunk leftover L.Empty)
+                Error s -> Left s
+        go x (L.Chunk y ys) =
+            case p (x <> y) of
+                NotEnoughInput -> go (x <> y) ys
+                Done leftover a -> Right (a, sConsLazy leftover ys)
+                Error s -> Left s
 
 pcapHdrParser :: Parser Bool
 pcapHdrParser i =
