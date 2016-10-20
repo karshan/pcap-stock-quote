@@ -9,9 +9,9 @@ module Util
 import           Data.Bits                     ((.|.))
 import qualified Data.ByteString               as BS (ByteString, drop, null,
                                                       take)
-import qualified Data.ByteString.Builder       as B (word32LE, toLazyByteString)
-import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
+import qualified Data.ByteString.Builder       as B (toLazyByteString, word32LE)
 import qualified Data.ByteString.Lazy          as L (toStrict)
+import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
 import qualified Data.ByteString.Unsafe        as BS (unsafeIndex)
 import           GHC.Base                      (Int (..), uncheckedShiftL#)
 import           GHC.Word                      (Word32 (..))

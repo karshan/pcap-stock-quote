@@ -1,11 +1,17 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
-import qualified Data.ByteString               as BS (ByteString, concat, drop,
-                                                      intercalate, take, replicate, writeFile, appendFile, head, last)
-import qualified Data.ByteString.Char8         as C (putStrLn, pack)
+import           Control.Monad.IO.Class        (MonadIO, liftIO)
+import           Control.Monad.Random          (evalRandT)
+import           Control.Monad.Random.Class    (MonadRandom, getRandomR)
+import qualified Data.ByteString               as BS (ByteString, appendFile,
+                                                      concat, drop, head,
+                                                      intercalate, last,
+                                                      replicate, take,
+                                                      writeFile)
+import qualified Data.ByteString.Char8         as C (pack, putStrLn)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
 import           Data.Heap                     (Entry (..), Heap)
@@ -16,11 +22,9 @@ import           Parser                        (Parser (..), bytes, runParser,
                                                 skip, word32)
 import           System.Environment            (getArgs)
 import           System.Random                 (getStdGen)
-import           Control.Monad.Random.Class    (MonadRandom, getRandomR)
-import           Control.Monad.Random          (evalRandT)
-import           Control.Monad.IO.Class        (MonadIO, liftIO)
-import           Time                          (Time (..), centiSecondsDiff,
-                                                pcapTimeToTime, timeToPcapTime, addCentiSeconds)
+import           Time                          (Time (..), addCentiSeconds,
+                                                centiSecondsDiff,
+                                                pcapTimeToTime, timeToPcapTime)
 import           Util                          (dropTake, putWord32le)
 
 usage :: IO ()
