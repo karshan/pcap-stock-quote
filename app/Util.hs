@@ -2,16 +2,22 @@
 module Util
     ( strictConsLazy
     , word32le
-    , dropTake)
+    , dropTake
+    , putWord32le)
     where
 
 import           Data.Bits                     ((.|.))
 import qualified Data.ByteString               as BS (ByteString, drop, null,
                                                       take)
+import qualified Data.ByteString.Builder       as B (word32LE, toLazyByteString)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
+import qualified Data.ByteString.Lazy          as L (toStrict)
 import qualified Data.ByteString.Unsafe        as BS (unsafeIndex)
 import           GHC.Base                      (Int (..), uncheckedShiftL#)
 import           GHC.Word                      (Word32 (..))
+
+putWord32le :: Word32 -> BS.ByteString
+putWord32le = L.toStrict . B.toLazyByteString . B.word32LE
 
 strictConsLazy :: BS.ByteString -> L.ByteString -> L.ByteString
 strictConsLazy b l =

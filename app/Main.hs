@@ -1,9 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import qualified Data.ByteString               as BS (ByteString, concat, drop,
-                                                      intercalate, take)
+                                                      intercalate, take, replicate, writeFile, appendFile)
 import qualified Data.ByteString.Char8         as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
@@ -14,9 +15,13 @@ import           GHC.Word                      (Word32 (..))
 import           Parser                        (Parser (..), bytes, runParser,
                                                 skip, word32)
 import           System.Environment            (getArgs)
+import           System.Random                 (getStdGen)
+import           Control.Monad.Random.Class    (MonadRandom, getRandomR)
+import           Control.Monad.Random          (evalRandT)
+import           Control.Monad.IO.Class        (MonadIO, liftIO)
 import           Time                          (Time (..), centiSecondsDiff,
-                                                pcapTimeToTime)
-import           Util                          (dropTake)
+                                                pcapTimeToTime, timeToPcapTime, addCentiSeconds)
+import           Util                          (dropTake, putWord32le)
 
 usage :: IO ()
 usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
@@ -25,6 +30,7 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
+        ("-g":n:[]) -> getStdGen >>= evalRandT (gen (read n))
         ("-r":fn:[]) -> run True fn
         (fn:"-r":[]) -> run True fn
         (fn:[]) -> run False fn
@@ -84,21 +90,57 @@ runNormal i =
                 (Right pkt) -> printQuotePkt pkt >> runNormal rest
         Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
+gen :: (MonadIO m, MonadRandom m) => Integer -> m ()
+gen n' = do
+    liftIO $ BS.writeFile "gen.pcap" ((w32 pcapHdrMagic) <> BS.replicate 20 0)
+    go (Time 0 0 3 0) n'
+    where
+        go _ 0 = return ()
+        go t n = do
+            let pktHdr l = ((\(s, us) -> w32 s <> w32 us) $ timeToPcapTime t)
+                        <> w32 (fromIntegral l) <> w32 (fromIntegral l)
+            nextT <- (t `addCentiSeconds`) <$> getRandomR (0, maxPacketTimeDiff)
+            isQuotePkt <- p pQuote
+            if isQuotePkt then do
+                pktLen :: Int <- getRandomR (quotePktLen, maxPacketLen)
+                acceptT <- (t `addCentiSeconds`) <$> getRandomR (-299, 299)
+                let pkt = pktHdr pktLen
+                        <> BS.replicate (fromIntegral $ pktLen - quotePktLen) 0
+                        <> quotePktMagic <> BS.replicate 201 0
+                        <> timeS acceptT <> "\255"
+                liftIO $ BS.appendFile "gen.pcap" pkt
+                go nextT (n - 1)
+            else do
+                pktLen :: Int <- getRandomR (0, maxPacketLen)
+                let pkt = pktHdr pktLen
+                        <> BS.replicate (fromIntegral pktLen) 0
+                liftIO $ BS.appendFile "gen.pcap" pkt
+                go nextT (n - 1)
+        p a = (< a) <$> getRandomR (0 :: Int, 99)
+        w32 = putWord32le
+        pQuote = 80
+        maxPacketTimeDiff = 5
+        maxPacketLen = 1000
+
 printQuotePkt :: QuotePkt -> IO ()
 printQuotePkt QuotePkt{..} =
     C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
         <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
         <> BS.intercalate " " (map qtyPriceStr $ reverse asks)
     where
-        timeS t = C.pack $ padShow (t_hours t) ++ ":"
-                    ++ padShow (t_minutes t) ++ ":"
-                    ++ padShow (t_seconds t) ++ "."
-                    ++ padShow (t_centiseconds t)
-        padShow x = if x < 10 then '0':show x else show x
-        qtyPriceStr (q, p) = q <> "@" <> p
+       qtyPriceStr (q, p) = q <> "@" <> p
         {- removeLeadingZeros, unused
         rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
                 in if nlz == BS.length a then "0" else BS.drop nlz a -}
+
+timeS :: Time -> BS.ByteString
+timeS t = C.pack $ padShow (t_hours t)
+            ++ padShow (t_minutes t)
+            ++ padShow (t_seconds t)
+            ++ padShow (t_centiseconds t)
+    where
+        padShow x = if x < 10 then '0':show x else show x
+
 
 type QtyPrice = (BS.ByteString, BS.ByteString)
 
