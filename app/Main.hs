@@ -3,7 +3,7 @@
 module Main where
 
 import qualified Data.ByteString               as BS (ByteString, concat, drop,
-                                                      intercalate, length, take)
+                                                      intercalate, take)
 import qualified Data.ByteString.Char8         as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
@@ -11,11 +11,12 @@ import           Data.Heap                     (Entry (..), Heap)
 import qualified Data.Heap                     as Heap
 import           Data.Monoid                   ((<>))
 import           GHC.Word                      (Word32 (..))
+import           Parser                        (Parser (..), bytes, runParser,
+                                                skip, word32)
 import           System.Environment            (getArgs)
 import           Time                          (Time (..), centiSecondsDiff,
                                                 pcapTimeToTime)
-import           Util                          (dropTake, getWord32At,
-                                                strictConsLazy, word32le)
+import           Util                          (dropTake)
 
 usage :: IO ()
 usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
@@ -146,63 +147,25 @@ pcapHdrMagic = 0xa1b2c3d4
 quotePktMagic :: BS.ByteString
 quotePktMagic = "B6034"
 
-type Parser a = BS.ByteString -> ParserOut a
-
-data ParserOut a =
-    NotEnoughInput
-  | Done BS.ByteString a
-  | Error String
-
-runParser :: L.ByteString -> Parser a -> Either String (a, L.ByteString)
-runParser l p = go "" l
-    where
-        go x L.Empty =
-            case p x of
-                NotEnoughInput -> Left "NotEnoughInput"
-                Done leftover a -> Right (a, L.Chunk leftover L.Empty)
-                Error s -> Left s
-        go x (L.Chunk y ys) =
-            case p (x <> y) of
-                NotEnoughInput -> go (x <> y) ys
-                Done leftover a -> Right (a, strictConsLazy leftover ys)
-                Error s -> Left s
-
 pcapHdrParser :: Parser Bool
-pcapHdrParser i =
-    if BS.length i < pcapGlobalHdrLen then
-        NotEnoughInput
-    else
-        let
-            leftover = BS.drop pcapGlobalHdrLen i
-        in
-            if word32le i == pcapHdrMagic then
-                Done leftover True
-            else
-                Done leftover False
+pcapHdrParser = do
+    magic <- word32
+    skip (pcapGlobalHdrLen - 4)
+    return $ magic == pcapHdrMagic
 
 quotePktParser :: Parser (Either Time QuotePkt)
-quotePktParser i =
-    if BS.length i < pcapPktHdrLen then
-        NotEnoughInput
-    else
-        let
-            pktTime = pcapTimeToTime (getWord32At 0 i, getWord32At 4 i)
-            pktLen = fromIntegral $ getWord32At 8 i
-            origLen = fromIntegral $ getWord32At 12 i
-            leftover = BS.drop (pcapPktHdrLen + pktLen) i
-        in
-            if BS.length i < pcapPktHdrLen + pktLen then
-                NotEnoughInput
-            else
-                if origLen /= pktLen || pktLen < quotePktLen then
-                    Done leftover (Left pktTime)
-                else
-                    let
-                        quotePktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) i
-                    in
-                        if BS.take 5 quotePktStart /= quotePktMagic then
-                            Done leftover (Left pktTime)
-                        else
-                            Done leftover (Right $ parseQuotePkt pktTime quotePktStart)
-
-
+quotePktParser = do
+    pktTime <- (curry pcapTimeToTime) <$> word32 <*> word32
+    pktLen <- fromIntegral <$> word32
+    origLen <- fromIntegral <$> word32
+    if origLen /= pktLen || pktLen < quotePktLen then do
+        skip pktLen
+        return (Left pktTime)
+    else do
+        skip (pktLen - quotePktLen)
+        magic <- bytes 5
+        if magic /= quotePktMagic then do
+            skip (quotePktLen - 5)
+            return (Left pktTime)
+        else
+            (Right . parseQuotePkt pktTime . (quotePktMagic <>)) <$> bytes (quotePktLen - 5)

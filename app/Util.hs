@@ -1,5 +1,9 @@
 {-# LANGUAGE MagicHash #-}
-module Util where
+module Util
+    ( strictConsLazy
+    , word32le
+    , dropTake)
+    where
 
 import           Data.Bits                     ((.|.))
 import qualified Data.ByteString               as BS (ByteString, drop, null,
@@ -29,10 +33,6 @@ word32le = \s ->
               (fromIntegral (s `BS.unsafeIndex` 2) `shiftl_w32` 16) .|.
               (fromIntegral (s `BS.unsafeIndex` 1) `shiftl_w32`  8) .|.
               (fromIntegral (s `BS.unsafeIndex` 0) )
-
-getWord32At :: Int -> BS.ByteString -> Word32
-{-# INLINE getWord32At #-}
-getWord32At n = word32le . BS.drop n
 
 dropTake :: Int -> Int -> BS.ByteString -> BS.ByteString
 dropTake d t = BS.take t . BS.drop d

@@ -1,4 +1,8 @@
-module Time where
+module Time
+    ( Time (..)
+    , centiSecondsDiff
+    , pcapTimeToTime)
+    where
 
 import           Data.DateTime         (toGregorian)
 import           Data.Time.Clock       (addUTCTime)
