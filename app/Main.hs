@@ -7,11 +7,12 @@ import           Control.Monad.IO.Class    (liftIO)
 import           Control.Monad.State       (StateT, execStateT)
 import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
-import qualified Data.ByteString           as BS (ByteString, append, concat,
+import qualified Data.ByteString           as BS (null, ByteString, append, concat,
                                                   drop, length, take, takeWhile, intercalate)
 import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
                                                  readFile)
+import qualified Data.ByteString.Lazy.Internal as L (ByteString(..))
 import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
 import           Data.DateTime             (toGregorian)
 import           Data.Heap                 (Entry (..), Heap)
@@ -22,6 +23,13 @@ import           Data.Time.Clock.POSIX
 import           GHC.Base                  (Int (..), uncheckedShiftL#)
 import           GHC.Word                  (Word32 (..))
 import           System.Environment        (getArgs)
+
+sConsLazy :: BS.ByteString -> L.ByteString -> L.ByteString
+sConsLazy b l =
+    if BS.null b then
+        l
+    else
+        L.Chunk b l
 
 -- shiftl_w32 and word32le are from the binary package
 -- https://hackage.haskell.org/package/binary-strict-0.2/src/src/Data/Binary/Strict/Get.hs
@@ -123,11 +131,28 @@ main = do
 run :: Bool -> String -> IO ()
 run sort fn = do
     lbs <- L.readFile fn
-    s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
-    case s of
-        (GetPacket h, _) ->
-            foldMap (printQuotePkt . payload) h
-        _ -> return ()
+    if sort then do
+        s <- execStateT (parseAndPrintChunks lbs) (GetGlobalHeader, "")
+        case s of
+            (GetPacket h, _) ->
+                foldMap (printQuotePkt . payload) h
+            _ -> return ()
+    else
+        case runParser lbs pcapHdrParser of
+            Left s -> putStrLn $ "pcapHdrParser failed: " ++ s
+            Right (False, _) -> putStrLn "not a pcap file"
+            Right (True, rest) ->
+                parseNPrint rest
+
+parseNPrint :: L.ByteString -> IO ()
+parseNPrint L.Empty = return ()
+parseNPrint i =
+    case runParser i quotePktParser of
+        Right (a, rest) ->
+            case a of
+                (Left _) -> parseNPrint rest
+                (Right pkt) -> printQuotePkt pkt >> parseNPrint rest
+        Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
 parseAndPrintChunks :: L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
 parseAndPrintChunks lbs =
@@ -149,6 +174,73 @@ pcapHdrMagic = 0xa1b2c3d4
 
 quotePktMagic :: BS.ByteString
 quotePktMagic = "B6034"
+
+type Parser a = BS.ByteString -> ParserOut a
+
+data ParserOut a =
+    NotEnoughInput
+  | Done BS.ByteString a
+  | Error String
+
+(>*) :: Parser a -> (a -> Parser b) -> Parser b
+(>*) f g i =
+    case f i of
+        NotEnoughInput -> NotEnoughInput
+        Error s -> Error s
+        Done leftover a -> g a leftover
+
+runParser :: L.ByteString -> Parser a -> Either String (a, L.ByteString)
+runParser l p = runParser' "" l p
+
+runParser' :: BS.ByteString -> L.ByteString -> Parser a -> Either String (a, L.ByteString)
+runParser' x L.Empty p =
+    case p x of
+        NotEnoughInput -> Left "NotEnoughInput"
+        Done leftover a -> Right (a, L.Chunk leftover L.Empty)
+        Error s -> Left s
+runParser' x (L.Chunk y ys) p =
+    case p (x <> y) of
+        NotEnoughInput -> runParser' (x <> y) ys p
+        Done leftover a -> Right (a, sConsLazy leftover ys)
+        Error s -> Left s
+
+pcapHdrParser :: Parser Bool
+pcapHdrParser i =
+    if BS.length i < pcapGlobalHdrLen then
+        NotEnoughInput
+    else
+        let
+            leftover = BS.drop pcapGlobalHdrLen i
+        in
+            if word32le i == pcapHdrMagic then
+                Done leftover True
+            else
+                Done leftover False
+
+quotePktParser :: Parser (Either Time QuotePkt)
+quotePktParser i =
+    if BS.length i < pcapPktHdrLen then
+        NotEnoughInput
+    else
+        let
+            pktTime = pcapTimeToTime (getWord32At 0 i, getWord32At 4 i)
+            pktLen = fromIntegral $ getWord32At 8 i
+            origLen = fromIntegral $ getWord32At 12 i
+            leftover = BS.drop (pcapPktHdrLen + pktLen) i
+        in
+            if BS.length i < pcapPktHdrLen + pktLen then
+                NotEnoughInput
+            else
+                if origLen /= pktLen || pktLen < quotePktLen then
+                    Done leftover (Left pktTime)
+                else
+                    let
+                        quotePktStart = BS.drop (pcapPktHdrLen + pktLen - quotePktLen) i
+                    in
+                        if BS.take 5 quotePktStart /= quotePktMagic then
+                            Done leftover (Left pktTime)
+                        else
+                            Done leftover (Right $ parseQuotePkt pktTime quotePktStart)
 
 parseAndPrintChunk :: StateT (FoldState, BS.ByteString) IO ()
 parseAndPrintChunk = do
