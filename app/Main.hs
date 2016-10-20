@@ -1,109 +1,21 @@
-{-# LANGUAGE MagicHash         #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
-import           Data.Bits                     ((.|.))
 import qualified Data.ByteString               as BS (ByteString, concat, drop,
-                                                      intercalate, length, null,
-                                                      take)
+                                                      intercalate, length, take)
 import qualified Data.ByteString.Char8         as C (pack, putStrLn, unpack)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
-import qualified Data.ByteString.Unsafe        as BS (unsafeIndex)
-import           Data.DateTime                 (toGregorian)
 import           Data.Heap                     (Entry (..), Heap)
 import qualified Data.Heap                     as Heap
 import           Data.Monoid                   ((<>))
-import           Data.Time.Clock
-import           Data.Time.Clock.POSIX
-import           GHC.Base                      (Int (..), uncheckedShiftL#)
 import           GHC.Word                      (Word32 (..))
 import           System.Environment            (getArgs)
-
-sConsLazy :: BS.ByteString -> L.ByteString -> L.ByteString
-sConsLazy b l =
-    if BS.null b then
-        l
-    else
-        L.Chunk b l
-
--- shiftl_w32 and word32le are from the binary package
--- https://hackage.haskell.org/package/binary-strict-0.2/src/src/Data/Binary/Strict/Get.hs
-shiftl_w32 :: Word32 -> Int -> Word32
-shiftl_w32 (W32# w) (I# i) = W32# (w `uncheckedShiftL#` i)
-
--- Read the first 4 bytes of a ByteString as a Word32
-word32le :: BS.ByteString -> Word32
-{-# INLINE word32le #-}
-word32le = \s ->
-              (fromIntegral (s `BS.unsafeIndex` 3) `shiftl_w32` 24) .|.
-              (fromIntegral (s `BS.unsafeIndex` 2) `shiftl_w32` 16) .|.
-              (fromIntegral (s `BS.unsafeIndex` 1) `shiftl_w32`  8) .|.
-              (fromIntegral (s `BS.unsafeIndex` 0) )
-
-getWord32At :: Int -> BS.ByteString -> Word32
-{-# INLINE getWord32At #-}
-getWord32At n = word32le . BS.drop n
-
-dropTake :: Int -> Int -> BS.ByteString -> BS.ByteString
-dropTake d t = BS.take t . BS.drop d
-
-data Time = Time {
-    t_hours        :: !Int
-  , t_minutes      :: !Int
-  , t_seconds      :: !Int
-  , t_centiseconds :: !Int
-} deriving (Eq, Ord, Show)
-
-centiSecondsDiff :: Time -> Time -> Int
-centiSecondsDiff a b =
-    ((t_hours a - t_hours b) * 360000)
-        + ((t_minutes a - t_minutes b) * 6000)
-        + ((t_seconds a - t_seconds b) * 100)
-        + (t_centiseconds a - t_centiseconds b)
-
--- also converts to JST (UTC+09:00)
-pcapTimeToTime :: (Word32, Word32) -> Time
-pcapTimeToTime (pktSec, pktUsec) =
-    let (_, _, _, hours, minutes, seconds) = toGregorian $ addUTCTime (9 * 3600) $ posixSecondsToUTCTime $ fromIntegral pktSec
-    in Time hours minutes seconds ((fromIntegral pktUsec) `div` 10000)
-
-type QtyPrice = (BS.ByteString, BS.ByteString)
-
-data QuotePkt = QuotePkt {
-    pktTime    :: !Time
-  , acceptTime :: !Time
-  , issueCode  :: !BS.ByteString
-  , bids       :: [QtyPrice] -- TODO Vec ?
-  , asks       :: [QtyPrice]
-} deriving (Eq, Show)
-
-parseAcceptTime :: BS.ByteString -> Time
-parseAcceptTime inp =
-    Time {
-        t_hours = read $ C.unpack $ BS.take 2 inp
-      , t_minutes = read $ C.unpack $ dropTake 2 2 inp
-      , t_seconds = read $ C.unpack $ dropTake 4 2 inp
-      , t_centiseconds = read $ C.unpack $ dropTake 6 2 inp
-    }
-
--- The returned list is in reverse order w.r.t. the input stream
-parseNQtyPrice :: Int -> BS.ByteString -> [QtyPrice]
-parseNQtyPrice = go []
-    where
-        go acc 0 _ = acc
-        go acc n inp = go ((dropTake 5 7 inp, BS.take 5 inp):acc) (n - 1) (BS.drop 12 inp)
-
-parseQuotePkt :: Time -> BS.ByteString -> QuotePkt
-parseQuotePkt inPktTime rawPkt =
-    QuotePkt {
-        pktTime = inPktTime
-      , acceptTime = parseAcceptTime $ dropTake 206 8 rawPkt
-      , issueCode = dropTake 5 12 rawPkt
-      , bids = parseNQtyPrice 5 $ BS.drop 29 rawPkt
-      , asks = parseNQtyPrice 5 $ BS.drop 96 rawPkt
-    }
+import           Time                          (Time (..), centiSecondsDiff,
+                                                pcapTimeToTime)
+import           Util                          (dropTake, getWord32At,
+                                                strictConsLazy, word32le)
 
 usage :: IO ()
 usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
@@ -148,6 +60,19 @@ runSort inp = go Heap.empty inp
                             go (Heap.insert (Entry (acceptTime pkt) pkt) h') rest
                 Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
+-- Print all packets in the heap that have accept times more than 3 seconds in the past
+-- from the given time.
+flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
+flushHeap t h =
+    case Heap.uncons h of
+        Just (minE, rest) ->
+            if t `centiSecondsDiff` priority minE > 300 then do
+                printQuotePkt (payload minE)
+                flushHeap t rest
+            else
+                return h
+        _ -> return h
+
 runNormal :: L.ByteString -> IO ()
 runNormal L.Empty = return ()
 runNormal i =
@@ -157,6 +82,58 @@ runNormal i =
                 (Left _) -> runNormal rest
                 (Right pkt) -> printQuotePkt pkt >> runNormal rest
         Left s -> putStrLn $ "quotePktParser failed: " ++ s
+
+printQuotePkt :: QuotePkt -> IO ()
+printQuotePkt QuotePkt{..} =
+    C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
+        <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
+        <> BS.intercalate " " (map qtyPriceStr $ reverse asks)
+    where
+        timeS t = C.pack $ padShow (t_hours t) ++ ":"
+                    ++ padShow (t_minutes t) ++ ":"
+                    ++ padShow (t_seconds t) ++ "."
+                    ++ padShow (t_centiseconds t)
+        padShow x = if x < 10 then '0':show x else show x
+        qtyPriceStr (q, p) = q <> "@" <> p
+        {- removeLeadingZeros, unused
+        rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
+                in if nlz == BS.length a then "0" else BS.drop nlz a -}
+
+type QtyPrice = (BS.ByteString, BS.ByteString)
+
+data QuotePkt = QuotePkt {
+    pktTime    :: !Time
+  , acceptTime :: !Time
+  , issueCode  :: !BS.ByteString
+  , bids       :: [QtyPrice] -- TODO Vec ?
+  , asks       :: [QtyPrice]
+} deriving (Eq, Show)
+
+parseAcceptTime :: BS.ByteString -> Time
+parseAcceptTime inp =
+    Time {
+        t_hours = read $ C.unpack $ BS.take 2 inp
+      , t_minutes = read $ C.unpack $ dropTake 2 2 inp
+      , t_seconds = read $ C.unpack $ dropTake 4 2 inp
+      , t_centiseconds = read $ C.unpack $ dropTake 6 2 inp
+    }
+
+-- The returned list is in reverse order w.r.t. the input stream
+parseNQtyPrice :: Int -> BS.ByteString -> [QtyPrice]
+parseNQtyPrice = go []
+    where
+        go acc 0 _ = acc
+        go acc n inp = go ((dropTake 5 7 inp, BS.take 5 inp):acc) (n - 1) (BS.drop 12 inp)
+
+parseQuotePkt :: Time -> BS.ByteString -> QuotePkt
+parseQuotePkt inPktTime rawPkt =
+    QuotePkt {
+        pktTime = inPktTime
+      , acceptTime = parseAcceptTime $ dropTake 206 8 rawPkt
+      , issueCode = dropTake 5 12 rawPkt
+      , bids = parseNQtyPrice 5 $ BS.drop 29 rawPkt
+      , asks = parseNQtyPrice 5 $ BS.drop 96 rawPkt
+    }
 
 pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen :: Int
 pcapGlobalHdrLen = 24
@@ -187,7 +164,7 @@ runParser l p = go "" l
         go x (L.Chunk y ys) =
             case p (x <> y) of
                 NotEnoughInput -> go (x <> y) ys
-                Done leftover a -> Right (a, sConsLazy leftover ys)
+                Done leftover a -> Right (a, strictConsLazy leftover ys)
                 Error s -> Left s
 
 pcapHdrParser :: Parser Bool
@@ -228,31 +205,4 @@ quotePktParser i =
                         else
                             Done leftover (Right $ parseQuotePkt pktTime quotePktStart)
 
--- Print all packets in the heap that have accept times more than 3 seconds in the past
--- from the given time.
-flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
-flushHeap t h =
-    case Heap.uncons h of
-        Just (minE, rest) ->
-            if t `centiSecondsDiff` priority minE > 300 then do
-                printQuotePkt (payload minE)
-                flushHeap t rest
-            else
-                return h
-        _ -> return h
 
-printQuotePkt :: QuotePkt -> IO ()
-printQuotePkt QuotePkt{..} =
-    C.putStrLn $ timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " "
-        <> BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids)
-        <> BS.intercalate " " (map qtyPriceStr $ reverse asks)
-    where
-        timeS t = C.pack $ padShow (t_hours t) ++ ":"
-                    ++ padShow (t_minutes t) ++ ":"
-                    ++ padShow (t_seconds t) ++ "."
-                    ++ padShow (t_centiseconds t)
-        padShow x = if x < 10 then '0':show x else show x
-        qtyPriceStr (q, p) = q <> "@" <> p
-        {- removeLeadingZeros, unused
-        rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
-                in if nlz == BS.length a then "0" else BS.drop nlz a -}
