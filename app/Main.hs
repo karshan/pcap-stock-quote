@@ -3,23 +3,23 @@
 {-# LANGUAGE RecordWildCards   #-}
 module Main where
 
-import           Data.Bits                 ((.|.))
-import qualified Data.ByteString           as BS (null, ByteString, concat,
-                                                  drop, length, take, intercalate)
-import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
-import qualified Data.ByteString.Lazy      as L (ByteString,
-                                                 readFile)
-import qualified Data.ByteString.Lazy.Internal as L (ByteString(..))
-import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
-import           Data.DateTime             (toGregorian)
-import           Data.Heap                 (Entry (..), Heap)
-import qualified Data.Heap                 as Heap
-import           Data.Monoid               ((<>))
+import           Data.Bits                     ((.|.))
+import qualified Data.ByteString               as BS (ByteString, concat, drop,
+                                                      intercalate, length, null,
+                                                      take)
+import qualified Data.ByteString.Char8         as C (pack, putStrLn, unpack)
+import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
+import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
+import qualified Data.ByteString.Unsafe        as BS (unsafeIndex)
+import           Data.DateTime                 (toGregorian)
+import           Data.Heap                     (Entry (..), Heap)
+import qualified Data.Heap                     as Heap
+import           Data.Monoid                   ((<>))
 import           Data.Time.Clock
 import           Data.Time.Clock.POSIX
-import           GHC.Base                  (Int (..), uncheckedShiftL#)
-import           GHC.Word                  (Word32 (..))
-import           System.Environment        (getArgs)
+import           GHC.Base                      (Int (..), uncheckedShiftL#)
+import           GHC.Word                      (Word32 (..))
+import           System.Environment            (getArgs)
 
 sConsLazy :: BS.ByteString -> L.ByteString -> L.ByteString
 sConsLazy b l =
