@@ -2,7 +2,6 @@
 module Lib where
 
 import           Control.Monad.Random          (evalRandT)
-import           Criterion.Main                (bench, defaultMain, nfIO)
 import qualified Data.ByteString.Lazy          as L (ByteString, readFile)
 import qualified Data.ByteString.Lazy.Internal as L (ByteString (..))
 import           Data.Heap                     (Entry (..), Heap)
@@ -18,11 +17,6 @@ import           Time                          (Time (..), centiSecondsDiff)
 usage :: IO ()
 usage = putStrLn "usage: ./pcap-stock-quote [-r] <pcap-file>"
 
-benchMain :: IO ()
-benchMain =
-    defaultMain [ bench "mdf-kospi200.20110216-0.pcap-normal" $ nfIO (run False "mdf-kospi200.20110216-0.pcap")
-                , bench "mdf-kospi200.20110216-0.pcap-sort" $ nfIO (run True "mdf-kospi200.20110216-0.pcap")
-                ]
 main :: IO ()
 main = do
     args <- getArgs
