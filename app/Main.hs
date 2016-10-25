@@ -40,20 +40,23 @@ run sort fn = do
     then do
       (h, _) <-
         execStateT
-          (parseAndPrintChunks sort (L.drop pcapGlobalHdrLen lbs))
+          (parseLbs (parseAndPrint sort) (L.drop pcapGlobalHdrLen lbs))
           (Heap.empty, "")
       foldMap (printQuotePkt . payload) h
     else putStrLn "Not a pcap file."
 
-parseAndPrintChunks :: Bool
-                    -> L.ByteString
-                    -> StateT (Heap HeapEntry, BS.ByteString) IO ()
-parseAndPrintChunks sort lbs =
+-- Run an explicitly stateful parsing function `f` on a lazy bytestring.
+-- The parsing function has state s and returns unconsumed input.
+parseLbs
+  :: (BS.ByteString -> s -> IO (s, BS.ByteString))
+  -> L.ByteString
+  -> StateT (s, BS.ByteString) IO ()
+parseLbs f lbs =
   L.foldrChunks
-    (\e a -> do
-       (state, leftover) <- get
-       put =<< liftIO (parseAndPrintChunk sort (leftover `BS.append` e) state)
-       a)
+    (\chunk acc -> do
+       (s, leftover) <- get
+       put =<< liftIO (f (leftover `BS.append` chunk) s)
+       acc)
     (return ())
     lbs
 
@@ -72,11 +75,13 @@ pcapHdrMagic = 0xa1b2c3d4
 quotePktMagic :: BS.ByteString
 quotePktMagic = "B6034"
 
-parseAndPrintChunk :: Bool
-                   -> BS.ByteString
-                   -> Heap HeapEntry
-                   -> IO (Heap HeapEntry, BS.ByteString)
-parseAndPrintChunk sort chunk h = do
+-- Prints all quote packets in input bytestring.
+parseAndPrint
+  :: Bool -- ^ Sort before printing?
+  -> BS.ByteString -- ^ Input bytestring.
+  -> Heap HeapEntry -- ^ Heap used for sorting.
+  -> IO (Heap HeapEntry, BS.ByteString) -- ^ Returns unprinted heap and leftover input.
+parseAndPrint sort chunk h = do
   if BS.length chunk < pcapPktHdrLen
     then return (h, chunk)
     else do
@@ -84,7 +89,7 @@ parseAndPrintChunk sort chunk h = do
           pktLen = fromIntegral $ getWord32At 8 chunk
           origLen = fromIntegral $ getWord32At 12 chunk
           goNextPkt h' =
-            parseAndPrintChunk sort (BS.drop (pcapPktHdrLen + pktLen) chunk) h'
+            parseAndPrint sort (BS.drop (pcapPktHdrLen + pktLen) chunk) h'
       if BS.length chunk < pcapPktHdrLen + pktLen
         then return (h, chunk)
         else if origLen /= pktLen || pktLen < quotePktLen

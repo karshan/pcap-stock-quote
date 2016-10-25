@@ -21,7 +21,7 @@ data QuotePkt = QuotePkt
   { pktTime :: !Time
   , acceptTime :: !Time
   , issueCode :: !BS.ByteString
-  , bids :: [QtyPrice] -- TODO Vec ?
+  , bids :: [QtyPrice]
   , asks :: [QtyPrice]
   } deriving (Eq, Show)
 
