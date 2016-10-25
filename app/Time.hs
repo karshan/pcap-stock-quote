@@ -48,7 +48,7 @@ pcapTimeToTime (pktSec, pktUsec) =
         (m', s) = sec `quotRem` 60
         (h, m) = m' `quotRem` 60
     in
-        Time (h + 9) m s ((fromIntegral pktUsec) `div` 10000)
+        Time ((h + 9) `mod` 24) m s ((fromIntegral pktUsec) `div` 10000)
 
 timeToPcapTime :: Time -> (Word32, Word32)
 timeToPcapTime Time{..} =

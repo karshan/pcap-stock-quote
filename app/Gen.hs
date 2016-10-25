@@ -28,8 +28,8 @@ gen n' = do
                 pktLen :: Int <- getRandomR (quotePktLen, maxPacketLen)
                 acceptT <- (t `addCentiSeconds`) <$> getRandomR (-299, 299)
                 let pkt = pktHdr pktLen
-                        <> BS.replicate (fromIntegral $ pktLen - quotePktLen) 0
-                        <> quotePktMagic <> BS.replicate 201 0
+                        <> BS.replicate (fromIntegral $ pktLen - quotePktLen) 0x41
+                        <> quotePktMagic <> BS.replicate 201 0x42
                         <> timeS acceptT <> "\255"
                 liftIO $ BS.appendFile "gen.pcap" pkt
                 go nextT (n - 1)

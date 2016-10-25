@@ -7,23 +7,19 @@ import           Control.Monad.IO.Class    (liftIO)
 import           Control.Monad.State       (StateT, execStateT)
 import           Control.Monad.State.Class (get, put)
 import           Data.Bits                 ((.|.))
-import qualified Data.ByteString           as BS (ByteString, append, concat,
-                                                  drop, length, take, takeWhile, intercalate)
-import qualified Data.ByteString.Char8     as C (pack, putStrLn, unpack)
+import qualified Data.ByteString           as BS (ByteString, append, drop,
+                                                  length, take)
 import qualified Data.ByteString.Lazy      as L (ByteString, foldrChunks,
                                                  readFile)
 import qualified Data.ByteString.Unsafe    as BS (unsafeIndex)
-import           Data.DateTime             (toGregorian)
 import           Data.Heap                 (Entry (..), Heap)
 import qualified Data.Heap                 as Heap
-import           Data.Monoid               ((<>))
-import           Data.Time.Clock
-import           Data.Time.Clock.POSIX
 import           GHC.Base                  (Int (..), uncheckedShiftL#)
 import           GHC.Word                  (Word32 (..))
-import           System.Environment        (getArgs)
-import Time (Time (..), pcapTimeToTime, centiSecondsDiff)
-import QuoteParser (printQuotePkt, QuotePkt (..), parseQuotePkt)
+import           QuoteParser               (QuotePkt (..), parseQuotePkt,
+                                            printQuotePkt)
+import           Time                      (Time (..), centiSecondsDiff,
+                                            pcapTimeToTime)
 
 -- shiftl_w32 and word32le are from the binary package
 -- https://hackage.haskell.org/package/binary-strict-0.2/src/src/Data/Binary/Strict/Get.hs
@@ -73,7 +69,7 @@ parseAndPrintChunks sort lbs =
         (return ())
         lbs
 
-quotePktLen, pcapPktHdrLen :: Int
+pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen :: Int
 pcapGlobalHdrLen = 24
 pcapPktHdrLen = 16
 quotePktLen = 215
@@ -138,9 +134,9 @@ parseAndPrintChunk sort chunk state =
 flushHeap :: Time -> Heap HeapEntry -> IO (Heap HeapEntry)
 flushHeap t h =
     case Heap.uncons h of
-        Just (min, rest) ->
-            if t `centiSecondsDiff` priority min > 300 then do
-                printQuotePkt (payload min)
+        Just (minE, rest) ->
+            if t `centiSecondsDiff` priority minE > 300 then do
+                printQuotePkt (payload minE)
                 flushHeap t rest
             else
                 return h
