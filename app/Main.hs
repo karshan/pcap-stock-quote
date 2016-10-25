@@ -10,7 +10,7 @@ import Control.Monad.State.Class (get, put)
 import qualified Data.ByteString as BS
        (ByteString, append, drop, length, take)
 import qualified Data.ByteString.Lazy as L
-       (ByteString, foldrChunks, readFile)
+       (ByteString, foldrChunks, readFile, toStrict, take, drop)
 import Data.Heap (Entry(..), Heap)
 import qualified Data.Heap as Heap
 import GHC.Word (Word32(..))
@@ -18,12 +18,6 @@ import QuoteParser (QuotePkt(..), parseQuotePkt, printQuotePkt)
 import Time (Time(..), centiSecondsDiff, pcapTimeToTime)
 import Util (getWord32At)
 import System.Environment (getArgs)
-
-data FoldState
-  = GetGlobalHeader 
-  | GetPacket (Heap HeapEntry)
-  | FailState String
-  deriving (Eq,Show)
 
 type HeapEntry = Entry Time QuotePkt
 
@@ -42,15 +36,19 @@ main =
 run :: Bool -> String -> IO ()
 run sort fn = 
   do lbs <- L.readFile fn
-     s <- 
-       execStateT (parseAndPrintChunks sort lbs)
-                  (GetGlobalHeader,"")
-     case s of
-       (GetPacket h,_) -> foldMap (printQuotePkt . payload) h
-       _ -> return ()
+     if getWord32At 0
+                    (L.toStrict $ L.take 4 lbs) ==
+        pcapHdrMagic
+        then do (h,_) <- 
+                  execStateT 
+                    (parseAndPrintChunks sort
+                                         (L.drop pcapGlobalHdrLen lbs))
+                    (Heap.empty,"")
+                foldMap (printQuotePkt . payload) h
+        else putStrLn "Not a pcap file."
 
 parseAndPrintChunks
-  :: Bool -> L.ByteString -> StateT (FoldState,BS.ByteString) IO ()
+  :: Bool -> L.ByteString -> StateT (Heap HeapEntry,BS.ByteString) IO ()
 parseAndPrintChunks sort lbs = 
   L.foldrChunks 
     (\e a -> 
@@ -63,8 +61,8 @@ parseAndPrintChunks sort lbs =
     (return ())
     lbs
 
-pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen
-  :: Int
+pcapGlobalHdrLen, quotePktLen, pcapPktHdrLen :: Num a
+                                             => a
 pcapGlobalHdrLen = 24
 
 pcapPktHdrLen = 16
@@ -78,61 +76,50 @@ quotePktMagic :: BS.ByteString
 quotePktMagic = "B6034"
 
 parseAndPrintChunk
-  :: Bool -> BS.ByteString -> FoldState -> IO (FoldState,BS.ByteString)
-parseAndPrintChunk sort chunk state = 
-  case state of
-    GetGlobalHeader -> 
-      if BS.length chunk < pcapGlobalHdrLen
-         then return (GetGlobalHeader,chunk)
-         else if getWord32At 0 chunk == pcapHdrMagic
-                 then parseAndPrintChunk sort
-                                         (BS.drop pcapGlobalHdrLen chunk)
-                                         (GetPacket Heap.empty)
-                 else return (FailState "Not a pcap file","")
-    GetPacket h -> 
-      do if BS.length chunk < pcapPktHdrLen
-            then return (GetPacket h,chunk)
-            else do let pktTime = 
-                          pcapTimeToTime 
-                            (getWord32At 0 chunk,getWord32At 4 chunk)
-                        pktLen = fromIntegral $ getWord32At 8 chunk
-                        origLen = fromIntegral $ getWord32At 12 chunk
-                        goNextPkt h' = 
-                          parseAndPrintChunk sort
-                                             (BS.drop (pcapPktHdrLen + pktLen) chunk)
-                                             (GetPacket h')
-                    if BS.length chunk < pcapPktHdrLen + pktLen
-                       then return (GetPacket h,chunk)
-                       else if origLen /= pktLen || pktLen < quotePktLen
-                               then do if sort
-                                          then do h' <- flushHeap pktTime h
-                                                  goNextPkt h'
-                                          else goNextPkt h
-                               else do let quotePktStart = 
-                                             BS.drop (pcapPktHdrLen + pktLen -
-                                                      quotePktLen)
-                                                     chunk
-                                       if BS.take 5 quotePktStart /=
-                                          quotePktMagic
-                                          then do if sort
-                                                     then do h' <- 
-                                                               flushHeap pktTime h
-                                                             goNextPkt h'
-                                                     else goNextPkt h
-                                          else do let quotePkt = 
-                                                        parseQuotePkt 
-                                                          pktTime
-                                                          (BS.take quotePktLen quotePktStart)
-                                                  if sort
-                                                     then do h' <- 
-                                                               flushHeap pktTime h
-                                                             goNextPkt (Heap.insert 
-                                                                          (Entry (acceptTime quotePkt)
-                                                                                 quotePkt)
-                                                                          h')
-                                                     else do printQuotePkt quotePkt
-                                                             goNextPkt h
-    FailState msg -> return (FailState msg,"")
+  :: Bool
+  -> BS.ByteString
+  -> Heap HeapEntry
+  -> IO (Heap HeapEntry,BS.ByteString)
+parseAndPrintChunk sort chunk h = 
+  do if BS.length chunk < pcapPktHdrLen
+        then return (h,chunk)
+        else do let pktTime = 
+                      pcapTimeToTime (getWord32At 0 chunk,getWord32At 4 chunk)
+                    pktLen = fromIntegral $ getWord32At 8 chunk
+                    origLen = fromIntegral $ getWord32At 12 chunk
+                    goNextPkt h' = 
+                      parseAndPrintChunk sort
+                                         (BS.drop (pcapPktHdrLen + pktLen) chunk)
+                                         h'
+                if BS.length chunk < pcapPktHdrLen + pktLen
+                   then return (h,chunk)
+                   else if origLen /= pktLen || pktLen < quotePktLen
+                           then do if sort
+                                      then do h' <- flushHeap pktTime h
+                                              goNextPkt h'
+                                      else goNextPkt h
+                           else do let quotePktStart = 
+                                         BS.drop (pcapPktHdrLen + pktLen -
+                                                  quotePktLen)
+                                                 chunk
+                                   if BS.take 5 quotePktStart /= quotePktMagic
+                                      then do if sort
+                                                 then do h' <- 
+                                                           flushHeap pktTime h
+                                                         goNextPkt h'
+                                                 else goNextPkt h
+                                      else do let quotePkt = 
+                                                    parseQuotePkt pktTime
+                                                                  (BS.take quotePktLen quotePktStart)
+                                              if sort
+                                                 then do h' <- 
+                                                           flushHeap pktTime h
+                                                         goNextPkt (Heap.insert 
+                                                                      (Entry (acceptTime quotePkt)
+                                                                             quotePkt)
+                                                                      h')
+                                                 else do printQuotePkt quotePkt
+                                                         goNextPkt h
 
 -- Print all packets in the heap that have accept times more than 3 seconds in the past from the
 -- given time.
