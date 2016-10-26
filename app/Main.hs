@@ -45,14 +45,12 @@ runSort inp = go Heap.empty inp
     go h L.Empty = foldMap (printQuotePkt . payload) h
     go h i =
       case runParser i quotePktParser of
-        Right (a, rest) ->
-          case a of
-            (Left time) -> do
-              h' <- flushHeap time h
-              go h' rest
-            (Right pkt) -> do
-              h' <- flushHeap (pktTime pkt) h
-              go (Heap.insert (Entry (acceptTime pkt) pkt) h') rest
+        Right (Left time, rest) -> do
+          h' <- flushHeap time h
+          go h' rest
+        Right (Right pkt, rest) -> do
+          h' <- flushHeap (pktTime pkt) h
+          go (Heap.insert (Entry (acceptTime pkt) pkt) h') rest
         Left s -> putStrLn $ "quotePktParser failed: " ++ s
 
 -- Print all packets in the heap that have accept times more than 3 seconds in the past
