@@ -4,7 +4,8 @@
 module QuoteParser where
 
 import qualified Data.ByteString as BS
-       (ByteString, concat, drop, head, intercalate, last, take)
+       (ByteString, drop, head, intercalate, last, take, length,
+        takeWhile, replicate)
 import qualified Data.ByteString.Char8 as C (pack, putStrLn)
 import Data.Monoid ((<>))
 import GHC.Word (Word32(..))
@@ -94,20 +95,27 @@ quotePktParser = do
 printQuotePkt :: QuotePkt -> IO ()
 printQuotePkt QuotePkt {..} =
   C.putStrLn $
-  timeS pktTime <> " " <> timeS acceptTime <> " " <> issueCode <> " " <>
-  BS.concat (map (\(q, p) -> q <> "@" <> p <> " ") bids) <>
+  showTime pktTime <> " " <> showTime acceptTime <> " " <> issueCode <> " " <>
+  BS.intercalate " " (map qtyPriceStr bids) <>
+  " " <>
   BS.intercalate " " (map qtyPriceStr $ reverse asks)
   where
-    qtyPriceStr (q, p) = q <> "@" <> p
-        {- removeLeadingZeros, unused
-        rlz a = let nlz = BS.length (BS.takeWhile (== 0x30) a)
-                in if nlz == BS.length a then "0" else BS.drop nlz a -}
+    qtyPriceStr (q, p) = padQty (rlz q) <> "@" <> padPrice (rlz p)
+    rlz a =
+      let nlz = BS.length $ BS.takeWhile (== 0x30) a
+      in if nlz == BS.length a
+           then "0"
+           else BS.drop nlz a
+    padQty a = BS.replicate (7 - BS.length a) 0x20 <> a
+    padPrice a = a <> BS.replicate (5 - BS.length a) 0x20
 
-timeS :: Time -> BS.ByteString
-timeS t =
+showTime :: Time -> BS.ByteString
+showTime t =
   C.pack $
   padShow (t_hours t) ++
-  padShow (t_minutes t) ++ padShow (t_seconds t) ++ padShow (t_centiseconds t)
+  ":" ++
+  padShow (t_minutes t) ++
+  ":" ++ padShow (t_seconds t) ++ "." ++ padShow (t_centiseconds t)
   where
     padShow x =
       if x < 10
