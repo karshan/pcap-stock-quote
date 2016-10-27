@@ -59,6 +59,14 @@ run sort fn = do
             foldMap (printQuotePkt . payload) h
         _ -> return ()
 
+run' :: Bool -> L.ByteString -> IO ()
+run' sort lbs = do
+    s <- execStateT (parseAndPrintChunks sort lbs) (GetGlobalHeader, "")
+    case s of
+        (GetPacket h, _) ->
+            foldMap (printQuotePkt . payload) h
+        _ -> return ()
+
 parseAndPrintChunks :: Bool -> L.ByteString -> StateT (FoldState, BS.ByteString) IO ()
 parseAndPrintChunks sort lbs =
     L.foldrChunks

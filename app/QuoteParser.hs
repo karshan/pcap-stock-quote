@@ -7,7 +7,7 @@ import qualified Data.ByteString       as BS (ByteString, concat, drop, head,
 import qualified Data.ByteString.Char8 as C (pack, putStrLn)
 import           Data.Monoid           ((<>))
 import           GHC.Word              (Word32 (..))
-import           Parser                (Parser, bytes, skip, word32)
+import           Parser                (Parser, bytes, skip, word32, ensure)
 import           Time                  (Time (..), pcapTimeToTime)
 import           Util                  (dropTake)
 
@@ -69,9 +69,11 @@ pcapHdrParser = do
 
 quotePktParser :: Parser (Either Time QuotePkt)
 quotePktParser = do
+    --ensure 16
     pTime <- (curry pcapTimeToTime) <$> word32 <*> word32
     pktLen <- fromIntegral <$> word32
     origLen <- fromIntegral <$> word32
+    --ensure pktLen
     if origLen /= pktLen || pktLen < quotePktLen then do
         skip pktLen
         return (Left pTime)
